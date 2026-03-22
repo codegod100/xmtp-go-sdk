@@ -363,7 +363,7 @@ fn identifier_to_libxmtp(ident: &XmtpIdentifier) -> Result<xmtp_id::associations
     
     match ident.kind {
         XmtpIdentifierKind::Ethereum => {
-            xmtp_id::associations::Identifier::parse_ethereum(identifier_str)
+            xmtp_id::associations::Identifier::eth(identifier_str)
                 .map_err(|e| XmtpError::InvalidArgument(e.to_string()))
         }
         XmtpIdentifierKind::Passkey => {

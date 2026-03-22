@@ -4,25 +4,16 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    rust-overlay.url = "github:oxalica/rust-overlay";
-    crane.url = "github:ipetkov/crane";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, ... }:
+  outputs = { self, nixpkgs, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
-          inherit system overlays;
+          inherit system;
         };
 
         lib = nixpkgs.lib;
-
-        # Rust toolchain
-        rustToolchain = pkgs.rust-bin.stable.latest.default;
-
-        # Crane library
-        craneLib = crane.mkLib pkgs;
 
         # Build inputs
         buildInputs = with pkgs; [
@@ -43,13 +34,8 @@
         libxmtpSrc = pkgs.fetchFromGitHub {
           owner = "xmtp";
           repo = "libxmtp";
-          rev = "main";
-          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; # Will be fixed
-        };
-
-        # Common args for crane builds
-        commonArgs = {
-          inherit buildInputs nativeBuildInputs;
+          rev = "2f6afaa729b11c8c2a25d7d470f6d7f852e78553";
+          hash = "sha256-kz4dzh6Xm5k6yHjhUUp/k6chv2QGuSAc9h8CZmnROWQ=";
         };
 
       in {
@@ -75,66 +61,60 @@
             };
           };
 
-          # Build stub FFI library (no libxmtp dependency, for testing)
-          xmtp-ffi-stub = craneLib.buildPackage (commonArgs // {
-            pname = "xmtp-ffi-stub";
-            version = "0.1.0";
-            src = ./ffi;
-
-            cargoToml = ./ffi/Cargo.toml;
-            cargoLock = ./ffi/Cargo.lock;
-
-            postInstall = ''
-              mkdir -p $out/lib
-              cp target/release/libxmtp_ffi.so $out/lib/ 2>/dev/null || true
-              cp target/release/libxmtp_ffi.a $out/lib/ 2>/dev/null || true
-            '';
-
-            meta.description = "C FFI stubs for libxmtp";
-          });
-
-          # Build FFI with real libxmtp (workspace build)
+          # Build mobile bindings with UniFFI and generate C headers
           xmtp-ffi = pkgs.stdenv.mkDerivation {
             pname = "xmtp-ffi";
             version = "0.1.0";
 
-            # Use libxmtp source as base
-            src = pkgs.fetchFromGitHub {
-              owner = "xmtp";
-              repo = "libxmtp";
-              rev = "2f6afaa729b11c8c2a25d7d470f6d7f852e78553";
-              hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-            };
+            src = libxmtpSrc;
 
-            nativeBuildInputs = nativeBuildInputs ++ [ rustToolchain ];
-            buildInputs = buildInputs;
+            nativeBuildInputs = nativeBuildInputs ++ [ 
+              pkgs.rustup
+              pkgs.stdenv.cc
+              pkgs.git
+              pkgs.cacert
+              pkgs.perl
+            ];
+            inherit buildInputs;
 
-            # Copy our FFI crate into the workspace
-            preBuild = ''
-              # Add our FFI crate to the workspace
-              cp -r ${./ffi} bindings/xmtp-ffi
-              chmod -R u+w bindings/xmtp-ffi
-
-              # Update workspace members
-              sed -i 's/members = \[/members = ["bindings\/xmtp-ffi",/' Cargo.toml
-            '';
+            # Relax sandbox so cargo can access network
+            __noChroot = true;
 
             buildPhase = ''
-              runHook preBuild
-              cargo build -p xmtp-ffi --release
-              runHook postBuild
+              export CARGO_HOME=$TMPDIR/cargo-home
+              export RUSTUP_HOME=$TMPDIR/rustup-home
+              export CARGO_NET_GIT_FETCH_WITH_CLI=true
+              export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+              export OPENSSL_NO_VENDOR=1
+              export OPENSSL_LIB_DIR=${pkgs.openssl.out}/lib
+              export OPENSSL_INCLUDE_DIR=${pkgs.openssl.dev}/include
+              export RUSTFLAGS="-C link-arg=-fuse-ld=gold"
+              
+              rustup default stable
+              
+              # Build the mobile crate (produces libxmtpv3.so)
+              cargo build -p xmtpv3 --release
+              
+              # Generate Swift headers - module.modulemap has C declarations
+              cargo run --features "uniffi/cli" --bin ffi-uniffi-bindgen -- generate --library target/release/libxmtpv3.so --language swift --out-dir $TMPDIR/swift_headers
+              
+              # Copy outputs
+              mkdir -p $out/lib $out/include
+              cp target/release/libxmtpv3.so $out/lib/
+              cp target/release/libxmtpv3.a $out/lib/ 2>/dev/null || true
+              
+              # Copy modulemap if it exists (C-compatible declarations)
+              cp $TMPDIR/swift_headers/*.h $out/include/ 2>/dev/null || true
+              cp $TMPDIR/swift_headers/module.modulemap $out/include/ 2>/dev/null || true
             '';
 
             installPhase = ''
-              runHook preInstall
-              mkdir -p $out/lib
-              cp target/release/libxmtp_ffi.so $out/lib/
-              cp target/release/libxmtp_ffi.a $out/lib/
-              runHook postInstall
+              # Already done in buildPhase
             '';
 
-            meta.description = "C FFI bindings for libxmtp with full implementation";
+            meta.description = "XMTP mobile bindings with C headers via UniFFI";
           };
+
         };
 
         devShells.default = pkgs.mkShell {
@@ -144,14 +124,18 @@
             pkgs.go
             pkgs.gopls
             pkgs.gotools
-            rustToolchain
+            pkgs.rustup
             pkgs.cargo-watch
           ] ++ nativeBuildInputs;
 
           shellHook = ''
             echo "XMTP Go SDK Development"
             echo "  Go: $(go version)"
-            echo "  Rust: $(rustc --version)"
+            if command -v rustc &> /dev/null; then
+              echo "  Rust: $(rustc --version)"
+            else
+              echo "  Rust: run 'rustup default stable' to install"
+            fi
             echo ""
             echo "Commands: make build | make test | make ffi"
             export LD_LIBRARY_PATH="$PWD/result/lib:$LD_LIBRARY_PATH"
