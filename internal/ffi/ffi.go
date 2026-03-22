@@ -1,9 +1,19 @@
-// Package ffi provides PureGo bindings to the XMTP libxmtpv3 library
+// Package ffi provides bindings to the XMTP libxmtpv3 library.
+// We use CGO for buffer operations (struct returns not supported by PureGo on Linux)
+// and PureGo for all other FFI calls.
 package ffi
 
+/*
+#cgo CFLAGS: -I/home/nandi/code/chat/xmtp-go-sdk/result/lib
+#cgo LDFLAGS: -L/home/nandi/code/chat/xmtp-go-sdk/result/lib -lxmtpv3 -ldl -lm -lpthread
+
+#include "xmtpv3_shim.h"
+*/
+import "C"
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"unsafe"
 
@@ -22,86 +32,47 @@ const (
 
 // Future poll results
 const (
-	FutureReady     = 0
-	FutureMaybeReady = 1
+	FutureReady        = 0
+	FutureMaybeReady   = 1
+	FuturePollComplete = 0
 )
-
-// rustBuffer matches UniFFI's C layout
-type rustBuffer struct {
-	capacity uint64
-	len      uint64
-	data     *byte
-}
-
-type rustCallStatus struct {
-	code     int8
-	errorBuf rustBuffer
-}
 
 var lib uintptr
 var libLoaded bool
 var loadErr error
 
-// FFI function pointers
+// FFI function pointers (PureGo for non-struct returns)
 var (
-	// RustBuffer utilities
-	ffi_rustbuffer_alloc    func(size uint64, status *rustCallStatus) rustBuffer
-	ffi_rustbuffer_from_bytes func(bytes rustBuffer, status *rustCallStatus) rustBuffer
-	ffi_rustbuffer_free     func(buf rustBuffer, status *rustCallStatus)
-	
-	// Async: connect_to_backend
-	ffi_connect_to_backend func(v3Host, gatewayHost, clientMode, appVersion, authCallback, authHandle rustBuffer) uint64
-	
-	// Async: create_client
-	ffi_create_client func(api, syncApi uint64, db, inboxId, accountIdentifier rustBuffer, nonce uint64, legacyKey, deviceSyncMode, allowOffline, forkRecovery rustBuffer) uint64
-	
-	// Sync: client methods
-	ffi_client_inbox_id      func(ptr uint64, status *rustCallStatus) rustBuffer
-	ffi_client_conversations func(ptr uint64, status *rustCallStatus) uint64
-	
-	// Sync: conversation methods
-	ffi_conversation_id       func(ptr uint64, status *rustCallStatus) rustBuffer
-	ffi_conversation_send_text func(ptr uint64, text rustBuffer, status *rustCallStatus) uint64
-	
-	// Free handles
-	ffi_free_client       func(handle uint64, status *rustCallStatus)
-	ffi_free_conversation func(handle uint64, status *rustCallStatus)
-	
-	// Future operations
+	ffi_free_client         func(handle uint64, status *C.RustCallStatus)
+	ffi_free_conversation   func(handle uint64, status *C.RustCallStatus)
 	ffi_future_poll_u64     func(handle uint64, callback uintptr, data uint64)
-	ffi_future_complete_u64 func(handle uint64, status *rustCallStatus) uint64
+	ffi_future_complete_u64 func(handle uint64, status *C.RustCallStatus) uint64
 	ffi_future_free         func(handle uint64)
 )
 
 func init() {
+	// Check for env var override first
+	libPath = "./result/lib/libxmtpv3.so" // default
+	if p := os.Getenv("XMTP_LIB_PATH"); p != "" {
+		libPath = p
+	}
+
+	// Debug: print what we're loading
+	fmt.Fprintf(os.Stderr, "DEBUG: Loading library from: %s\n", libPath)
+
 	var err error
 	lib, err = purego.Dlopen(libPath, purego.RTLD_NOW|purego.RTLD_GLOBAL)
 	if err != nil {
 		loadErr = fmt.Errorf("failed to load %s: %w", libPath, err)
 		return
 	}
-	
-	// Register functions
-	purego.RegisterLibFunc(&ffi_rustbuffer_alloc, lib, "uniffi_uniffi_rustbuffer_alloc")
-	purego.RegisterLibFunc(&ffi_rustbuffer_from_bytes, lib, "uniffi_uniffi_rustbuffer_from_bytes")
-	purego.RegisterLibFunc(&ffi_rustbuffer_free, lib, "uniffi_uniffi_rustbuffer_free")
-	
-	purego.RegisterLibFunc(&ffi_connect_to_backend, lib, "uniffi_xmtpv3_fn_func_connect_to_backend")
-	purego.RegisterLibFunc(&ffi_create_client, lib, "uniffi_xmtpv3_fn_func_create_client")
-	
-	purego.RegisterLibFunc(&ffi_client_inbox_id, lib, "uniffi_xmtpv3_fn_method_ffixmtpclient_inbox_id")
-	purego.RegisterLibFunc(&ffi_client_conversations, lib, "uniffi_xmtpv3_fn_method_ffixmtpclient_conversations")
-	
-	purego.RegisterLibFunc(&ffi_conversation_id, lib, "uniffi_xmtpv3_fn_method_fficonversation_id")
-	purego.RegisterLibFunc(&ffi_conversation_send_text, lib, "uniffi_xmtpv3_fn_method_fficonversation_send_text")
-	
+
 	purego.RegisterLibFunc(&ffi_free_client, lib, "uniffi_xmtpv3_fn_free_ffixmtpclient")
 	purego.RegisterLibFunc(&ffi_free_conversation, lib, "uniffi_xmtpv3_fn_free_fficonversation")
-	
 	purego.RegisterLibFunc(&ffi_future_poll_u64, lib, "ffi_xmtpv3_rust_future_poll_u64")
 	purego.RegisterLibFunc(&ffi_future_complete_u64, lib, "ffi_xmtpv3_rust_future_complete_u64")
 	purego.RegisterLibFunc(&ffi_future_free, lib, "ffi_xmtpv3_rust_future_free_u64")
-	
+
 	libLoaded = true
 }
 
@@ -120,57 +91,47 @@ func LoadError() error {
 	return loadErr
 }
 
-// Buffer helpers
+// -- Buffer operations (CGO-only, not exposed outside package) --
 
-func stringToBuffer(s string) (rustBuffer, error) {
-	return bytesToBuffer([]byte(s))
-}
-
-func bytesToBuffer(b []byte) (rustBuffer, error) {
+func cBytesToBuffer(b []byte) (C.RustBuffer, error) {
 	if len(b) == 0 {
-		return rustBuffer{}, nil
+		return C.RustBuffer{}, nil
 	}
-	
-	var status rustCallStatus
-	buf := ffi_rustbuffer_alloc(uint64(len(b)), &status)
+
+	var status C.RustCallStatus
+	cdata := C.CBytes(b)
+	defer C.free(cdata)
+
+	fb := C.ForeignBytes{
+		len:  C.int32_t(len(b)),
+		data: (*C.uint8_t)(cdata),
+	}
+	buf := C.ffi_xmtpv3_rustbuffer_from_bytes(fb, &status)
 	if status.code != CallSuccess {
-		return rustBuffer{}, statusToError(status)
+		return C.RustBuffer{}, cStatusToError(status)
 	}
-	
-	// Copy data
-	dst := unsafe.Slice(buf.data, buf.capacity)
-	copy(dst, b)
-	buf.len = uint64(len(b))
-	
 	return buf, nil
 }
 
-func bufferToBytes(buf rustBuffer) []byte {
+func cBufferToBytes(buf C.RustBuffer) []byte {
 	if buf.len == 0 || buf.data == nil {
 		return nil
 	}
-	src := unsafe.Slice(buf.data, buf.len)
+	src := unsafe.Slice((*byte)(unsafe.Pointer(buf.data)), buf.len)
 	result := make([]byte, buf.len)
 	copy(result, src)
 	return result
 }
 
-func bufferToString(buf rustBuffer) string {
-	return string(bufferToBytes(buf))
+func cFreeBuffer(buf C.RustBuffer) {
+	var status C.RustCallStatus
+	C.ffi_xmtpv3_rustbuffer_free(buf, &status)
 }
 
-func freeBuffer(buf rustBuffer) {
-	if !libLoaded {
-		return
-	}
-	var status rustCallStatus
-	ffi_rustbuffer_free(buf, &status)
-}
+func cStatusToError(status C.RustCallStatus) error {
+	msg := string(cBufferToBytes(status.errorBuf))
+	cFreeBuffer(status.errorBuf)
 
-func statusToError(status rustCallStatus) error {
-	msg := bufferToString(status.errorBuf)
-	freeBuffer(status.errorBuf)
-	
 	switch status.code {
 	case CallError:
 		return errors.New(msg)
@@ -181,13 +142,25 @@ func statusToError(status rustCallStatus) error {
 	}
 }
 
-// Async helpers - block on futures
+// -- Exported functions for testing --
+
+// BufferRoundTrip tests the buffer conversion functions
+func BufferRoundTrip(input []byte) ([]byte, error) {
+	buf, err := cBytesToBuffer(input)
+	if err != nil {
+		return nil, err
+	}
+	defer cFreeBuffer(buf)
+	return cBufferToBytes(buf), nil
+}
+
+// -- Async helpers --
 
 var callbackMu sync.Mutex
 var callbackCond = sync.NewCond(&callbackMu)
 var callbackResult int8
 
-//go:export futureCallback
+//export futureCallback
 func futureCallback(data uint64, result int8) {
 	callbackMu.Lock()
 	callbackResult = result
@@ -199,21 +172,20 @@ func awaitFuture(handle uint64) error {
 	if !libLoaded {
 		return loadErr
 	}
-	
+
 	callbackMu.Lock()
 	defer callbackMu.Unlock()
-	
-	// Poll with callback
+
 	cb := purego.NewCallback(futureCallback)
 	for {
 		ffi_future_poll_u64(handle, cb, 0)
 		callbackCond.Wait()
-		
+
 		if callbackResult == FutureReady {
 			break
 		}
 	}
-	
+
 	return nil
 }
 
@@ -221,12 +193,89 @@ func awaitFutureU64(handle uint64) (uint64, error) {
 	if err := awaitFuture(handle); err != nil {
 		return 0, err
 	}
-	
-	var status rustCallStatus
+
+	var status C.RustCallStatus
 	result := ffi_future_complete_u64(handle, &status)
 	if status.code != CallSuccess {
-		return 0, statusToError(status)
+		return 0, cStatusToError(status)
 	}
-	
+
 	return result, nil
+}
+
+func freeFuture(handle uint64) {
+	ffi_future_free(handle)
+}
+
+// -- Client functions --
+
+// ConnectToBackend connects to the XMTP backend
+func ConnectToBackend(v3Host, gatewayHost, appVersion string) (apiHandle uint64, err error) {
+	if !libLoaded {
+		return 0, loadErr
+	}
+
+	v3HostBuf, err := cBytesToBuffer([]byte(v3Host))
+	if err != nil {
+		return 0, err
+	}
+	defer cFreeBuffer(v3HostBuf)
+
+	gatewayHostBuf, err := cBytesToBuffer([]byte(gatewayHost))
+	if err != nil {
+		return 0, err
+	}
+	defer cFreeBuffer(gatewayHostBuf)
+
+	clientModeBuf, err := cBytesToBuffer([]byte("ReadWrite"))
+	if err != nil {
+		return 0, err
+	}
+	defer cFreeBuffer(clientModeBuf)
+
+	appVersionBuf, err := cBytesToBuffer([]byte(appVersion))
+	if err != nil {
+		return 0, err
+	}
+	defer cFreeBuffer(appVersionBuf)
+
+	var status C.RustCallStatus
+	futureHandle := C.uniffi_xmtpv3_fn_func_connect_to_backend(
+		v3HostBuf, gatewayHostBuf, clientModeBuf, appVersionBuf,
+		C.RustBuffer{}, C.RustBuffer{},
+		&status,
+	)
+	if status.code != CallSuccess {
+		return 0, cStatusToError(status)
+	}
+
+	apiHandle, err = awaitFutureU64(uint64(futureHandle))
+	freeFuture(uint64(futureHandle))
+	return apiHandle, err
+}
+
+// FreeClient frees a client handle
+func FreeClient(handle uint64) error {
+	if !libLoaded {
+		return loadErr
+	}
+	var status C.RustCallStatus
+	ffi_free_client(handle, &status)
+	if status.code != CallSuccess {
+		return cStatusToError(status)
+	}
+	return nil
+}
+
+// FreeConversation frees a conversation handle
+func FreeConversation(handle uint64) error {
+	if !libLoaded {
+		return loadErr
+	}
+	var status C.RustCallStatus
+	ffi_free_conversation(handle, &status)
+	if status.code != CallSuccess {
+		return cStatusToError(status)
+	}
+	return nil
 }
