@@ -353,7 +353,8 @@ func EthereumHashPersonal(message string) ([]byte, error) {
 		return nil, loadErr
 	}
 
-	msgBuf, err := cBytesToBuffer([]byte(message))
+	// String arguments use try_lift which expects raw bytes (no length prefix)
+	msgBuf, err := cStringToBuffer(message)
 	if err != nil {
 		return nil, err
 	}
