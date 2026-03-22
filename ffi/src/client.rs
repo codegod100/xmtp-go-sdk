@@ -1,38 +1,15 @@
 //! Client FFI functions
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::ptr;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 use crate::types::*;
-use crate::error::XmtpFfiError;
+use crate::error::XmtpError;
 use crate::signer::FfiSigner;
 
-/// Internal client wrapper
-pub struct XmtpClientInner {
-    // TODO: Add actual client when integrated with libxmtp
-    // client: Arc<RustXmtpClient>,
-    inbox_id: String,
-    signer: Option<Arc<FfiSigner>>,
-    options: XmtpClientOptions,
-}
-
-impl XmtpClientInner {
-    pub fn new(
-        signer: Option<Arc<FfiSigner>>,
-        identifier: Option<XmtpIdentifier>,
-        options: XmtpClientOptions,
-    ) -> Result<Self, XmtpFfiError> {
-        // TODO: Create actual client
-        // For now, return a mock client
-        Ok(XmtpClientInner {
-            inbox_id: String::new(),
-            signer,
-            options,
-        })
-    }
-}
+#[cfg(feature = "libxmtp")]
+use crate::xmtp_client::{XmtpClientInner, XmtpConversationsInner, XmtpConversationInner, XmtpMessageInner};
 
 /// Create a new XMTP client with a signer
 /// 
@@ -46,32 +23,36 @@ pub extern "C" fn xmtp_client_create(
     opts: *const XmtpClientOptions,
     out_client: *mut XmtpClientHandle,
 ) -> XmtpResult {
-    let result = || {
+    let result: Result<(), XmtpError> = (|| {
         let opts = if opts.is_null() {
             XmtpClientOptions::default()
         } else {
             unsafe { *opts }
         };
         
-        let signer = Arc::new(FfiSigner::new(signer_callback, signer_user_data));
-        let identifier = identifier;
+        let signer = FfiSigner::new(signer_callback, signer_user_data);
         
-        let client = XmtpClientInner::new(
-            Some(signer),
-            Some(identifier),
-            opts,
-        )?;
+        #[cfg(feature = "libxmtp")]
+        {
+            let ident = identifier_to_libxmtp(&identifier)?;
+            let client = XmtpClientInner::new(signer, ident, opts)?;
+            let handle = Box::into_raw(Box::new(client)) as XmtpClientHandle;
+            
+            if !out_client.is_null() {
+                unsafe { *out_client = handle };
+            }
+        }
         
-        let handle = Box::into_raw(Box::new(client)) as XmtpClientHandle;
-        
-        if !out_client.is_null() {
-            unsafe { *out_client = handle };
+        #[cfg(not(feature = "libxmtp"))]
+        {
+            let _ = (signer, opts);
+            return Err(XmtpError::Generic("libxmtp feature not enabled".into()));
         }
         
         Ok(())
-    };
+    })();
     
-    match result() {
+    match result {
         Ok(()) => XmtpResult::ok(),
         Err(e) => XmtpResult::err(e.to_string()),
     }
@@ -84,24 +65,36 @@ pub extern "C" fn xmtp_client_build(
     opts: *const XmtpClientOptions,
     out_client: *mut XmtpClientHandle,
 ) -> XmtpResult {
-    let result = || {
-        let opts = if opts.is_null() {
-            XmtpClientOptions::default()
-        } else {
-            unsafe { *opts }
-        };
+    let result: Result<(), XmtpError> = (|| {
+        #[cfg(feature = "libxmtp")]
+        {
+            let opts = if opts.is_null() {
+                XmtpClientOptions::default()
+            } else {
+                unsafe { *opts }
+            };
+            
+            // Create a dummy signer for building
+            let signer = FfiSigner::empty();
+            let ident = identifier_to_libxmtp(&identifier)?;
+            let client = XmtpClientInner::new(signer, ident, opts)?;
+            let handle = Box::into_raw(Box::new(client)) as XmtpClientHandle;
+            
+            if !out_client.is_null() {
+                unsafe { *out_client = handle };
+            }
+        }
         
-        let client = XmtpClientInner::new(None, Some(identifier), opts)?;
-        let handle = Box::into_raw(Box::new(client)) as XmtpClientHandle;
-        
-        if !out_client.is_null() {
-            unsafe { *out_client = handle };
+        #[cfg(not(feature = "libxmtp"))]
+        {
+            let _ = (identifier, opts, out_client);
+            return Err(XmtpError::Generic("libxmtp feature not enabled".into()));
         }
         
         Ok(())
-    };
+    })();
     
-    match result() {
+    match result {
         Ok(()) => XmtpResult::ok(),
         Err(e) => XmtpResult::err(e.to_string()),
     }
@@ -111,6 +104,7 @@ pub extern "C" fn xmtp_client_build(
 #[no_mangle]
 pub extern "C" fn xmtp_client_free(client: XmtpClientHandle) {
     if !client.is_null() {
+        #[cfg(feature = "libxmtp")]
         unsafe {
             drop(Box::from_raw(client as *mut XmtpClientInner));
         }
@@ -128,27 +122,42 @@ pub extern "C" fn xmtp_client_inbox_id(
             unsafe {
                 *out_result = XmtpStringResult {
                     value: ptr::null_mut(),
-                    error: Box::into_raw(Box::new(XmtpFfiError::InvalidArgument("null client".into()).to_ffi())),
+                    error: Box::into_raw(Box::new(XmtpError::InvalidArgument("null client".into()).to_ffi())),
                 };
             }
         }
         return;
     }
     
-    let client = unsafe { &*(client as *const XmtpClientInner) };
-    let inbox_id = client.inbox_id.clone();
+    #[cfg(feature = "libxmtp")]
+    {
+        let client = unsafe { &*(client as *const XmtpClientInner) };
+        let inbox_id = client.inbox_id().to_string();
+        
+        let value = match CString::new(inbox_id) {
+            Ok(s) => s.into_raw(),
+            Err(_) => ptr::null_mut(),
+        };
+        
+        if !out_result.is_null() {
+            unsafe {
+                *out_result = XmtpStringResult {
+                    value,
+                    error: ptr::null_mut(),
+                };
+            }
+        }
+    }
     
-    let value = match CString::new(inbox_id) {
-        Ok(s) => s.into_raw(),
-        Err(_) => ptr::null_mut(),
-    };
-    
-    if !out_result.is_null() {
-        unsafe {
-            *out_result = XmtpStringResult {
-                value,
-                error: ptr::null_mut(),
-            };
+    #[cfg(not(feature = "libxmtp"))]
+    {
+        if !out_result.is_null() {
+            unsafe {
+                *out_result = XmtpStringResult {
+                    value: ptr::null_mut(),
+                    error: Box::into_raw(Box::new(XmtpError::Generic("libxmtp not enabled".into()).to_ffi())),
+                };
+            }
         }
     }
 }
@@ -164,24 +173,32 @@ pub extern "C" fn xmtp_client_installation_id(
         return XmtpResult::err("null client");
     }
     
-    // TODO: Get actual installation ID
-    let installation_id: [u8; 32] = [0u8; 32];
-    
-    if !out_len.is_null() {
-        unsafe { *out_len = installation_id.len() };
-    }
-    
-    if !out_data.is_null() {
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                installation_id.as_ptr(),
-                out_data,
-                installation_id.len(),
-            );
+    #[cfg(feature = "libxmtp")]
+    {
+        let client = unsafe { &*(client as *const XmtpClientInner) };
+        let installation_id = client.installation_id();
+        
+        if !out_len.is_null() {
+            unsafe { *out_len = installation_id.len() };
         }
+        
+        if !out_data.is_null() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    installation_id.as_ptr(),
+                    out_data,
+                    installation_id.len(),
+                );
+            }
+        }
+        
+        XmtpResult::ok()
     }
     
-    XmtpResult::ok()
+    #[cfg(not(feature = "libxmtp"))]
+    {
+        XmtpResult::err("libxmtp not enabled")
+    }
 }
 
 /// Check if the client is registered
@@ -191,8 +208,13 @@ pub extern "C" fn xmtp_client_is_registered(client: XmtpClientHandle) -> bool {
         return false;
     }
     
-    let _client = unsafe { &*(client as *const XmtpClientInner) };
-    // TODO: Check actual registration status
+    #[cfg(feature = "libxmtp")]
+    {
+        let client = unsafe { &*(client as *const XmtpClientInner) };
+        client.is_registered()
+    }
+    
+    #[cfg(not(feature = "libxmtp"))]
     false
 }
 
@@ -206,15 +228,23 @@ pub extern "C" fn xmtp_client_conversations(
         return XmtpResult::err("null client");
     }
     
-    // TODO: Create actual conversations manager
-    let conversations = Box::new(());
-    let handle = Box::into_raw(conversations) as XmtpConversationsHandle;
-    
-    if !out_conversations.is_null() {
-        unsafe { *out_conversations = handle };
+    #[cfg(feature = "libxmtp")]
+    {
+        let client = unsafe { &*(client as *const XmtpClientInner) };
+        let conversations = client.conversations();
+        let handle = Arc::into_raw(conversations) as XmtpConversationsHandle;
+        
+        if !out_conversations.is_null() {
+            unsafe { *out_conversations = handle };
+        }
+        
+        XmtpResult::ok()
     }
     
-    XmtpResult::ok()
+    #[cfg(not(feature = "libxmtp"))]
+    {
+        XmtpResult::err("libxmtp not enabled")
+    }
 }
 
 /// Register the client with the XMTP network
@@ -228,10 +258,21 @@ pub extern "C" fn xmtp_client_register(
         return XmtpResult::err("null client");
     }
     
-    let _client = unsafe { &*(client as *const XmtpClientInner) };
+    #[cfg(feature = "libxmtp")]
+    {
+        let client = unsafe { &*(client as *const XmtpClientInner) };
+        let signer = FfiSigner::new(signer_callback, signer_user_data);
+        
+        match client.register(&signer) {
+            Ok(()) => XmtpResult::ok(),
+            Err(e) => XmtpResult::err(e.to_string()),
+        }
+    }
     
-    // TODO: Implement actual registration
-    XmtpResult::ok()
+    #[cfg(not(feature = "libxmtp"))]
+    {
+        XmtpResult::err("libxmtp not enabled")
+    }
 }
 
 /// Check if identifiers can be messaged
@@ -254,15 +295,12 @@ pub extern "C" fn xmtp_client_can_message(
         return XmtpResult::ok();
     }
     
-    // TODO: Implement actual can_message check
-    let _identifiers = unsafe { std::slice::from_raw_parts(identifiers, identifiers_len) };
-    
+    // TODO: Implement with libxmtp
     if !out_len.is_null() {
         unsafe { *out_len = identifiers_len };
     }
     
     if !out_results.is_null() {
-        // For now, return all true
         for i in 0..identifiers_len {
             unsafe { *out_results.add(i) = true };
         }
@@ -283,14 +321,14 @@ pub extern "C" fn xmtp_client_get_inbox_id_by_identifier(
             unsafe {
                 *out_result = XmtpStringResult {
                     value: ptr::null_mut(),
-                    error: Box::into_raw(Box::new(XmtpFfiError::InvalidArgument("null client".into()).to_ffi())),
+                    error: Box::into_raw(Box::new(XmtpError::InvalidArgument("null client".into()).to_ffi())),
                 };
             }
         }
         return;
     }
     
-    // TODO: Implement actual lookup
+    // TODO: Implement with libxmtp
     let value = CString::new("").unwrap().into_raw();
     
     if !out_result.is_null() {
@@ -309,5 +347,27 @@ pub extern "C" fn xmtp_client_libxmtp_version() -> *mut c_char {
     match CString::new(env!("CARGO_PKG_VERSION")) {
         Ok(s) => s.into_raw(),
         Err(_) => ptr::null_mut(),
+    }
+}
+
+#[cfg(feature = "libxmtp")]
+fn identifier_to_libxmtp(ident: &XmtpIdentifier) -> Result<xmtp_id::associations::Identifier, XmtpError> {
+    let identifier_str = unsafe {
+        if ident.identifier.is_null() {
+            return Err(XmtpError::InvalidArgument("null identifier".into()));
+        }
+        std::ffi::CStr::from_ptr(ident.identifier)
+            .to_str()
+            .map_err(|e| XmtpError::InvalidArgument(e.to_string()))?
+    };
+    
+    match ident.kind {
+        XmtpIdentifierKind::Ethereum => {
+            xmtp_id::associations::Identifier::parse_ethereum(identifier_str)
+                .map_err(|e| XmtpError::InvalidArgument(e.to_string()))
+        }
+        XmtpIdentifierKind::Passkey => {
+            Err(XmtpError::Generic("Passkey not yet supported".into()))
+        }
     }
 }

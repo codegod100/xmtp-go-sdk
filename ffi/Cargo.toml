@@ -4,32 +4,51 @@ version = "0.1.0"
 edition = "2021"
 description = "C FFI bindings for XMTP MLS library"
 license = "MIT"
+publish = false
 
 [lib]
 name = "xmtp_ffi"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-xmtp_mls.workspace = true
-xmtp_common.workspace = true
-xmtp_db.workspace = true
-xmtp_id.workspace = true
-xmtp_cryptography.workspace = true
-xmtp_content_types.workspace = true
-xmtp_proto.workspace = true
-xmtp_api.workspace = true
-xmtp_api_grpc.workspace = true
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+futures = "0.3"
 
-tokio = { workspace = true, features = ["rt-multi-thread"] }
-futures.workspace = true
-parking_lot.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+# Utilities  
+parking_lot = "0.12"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+hex = "0.4"
+
+# XMTP dependencies
+xmtp_mls = { path = "../libxmtp/crates/xmtp_mls", optional = true }
+xmtp_common = { path = "../libxmtp/crates/xmtp_common", optional = true }
+xmtp_db = { path = "../libxmtp/crates/xmtp_db", optional = true }
+xmtp_id = { path = "../libxmtp/crates/xmtp_id", optional = true }
+xmtp_cryptography = { path = "../libxmtp/crates/xmtp_cryptography", optional = true }
+xmtp_content_types = { path = "../libxmtp/crates/xmtp_content_types", optional = true }
+xmtp_proto = { path = "../libxmtp/crates/xmtp_proto", optional = true }
+xmtp_api = { path = "../libxmtp/crates/xmtp_api", optional = true }
+xmtp_api_grpc = { path = "../libxmtp/crates/xmtp_api_grpc", optional = true }
+xmtp_configuration = { path = "../libxmtp/crates/xmtp_configuration", optional = true }
 
 [build-dependencies]
 cbindgen = "0.28"
 
-[[bin]]
-name = "generate-headers"
-path = "src/bin/generate_headers.rs"
+[features]
+default = []
+# Enable full libxmtp integration
+libxmtp = [
+    "dep:xmtp_mls",
+    "dep:xmtp_common",
+    "dep:xmtp_db",
+    "dep:xmtp_id",
+    "dep:xmtp_cryptography",
+    "dep:xmtp_content_types",
+    "dep:xmtp_proto",
+    "dep:xmtp_api",
+    "dep:xmtp_api_grpc",
+    "dep:xmtp_configuration",
+]

@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["ffi"]
+
+# When libxmtp is available at ../libxmtp, you can build with:
+# cargo build --features libxmtp
+#
+# Or create a symlink: ln -s /path/to/libxmtp libxmtp

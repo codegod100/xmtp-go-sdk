@@ -3,9 +3,9 @@
 use std::ffi::CString;
 use thiserror::Error;
 
-/// FFI Error type
+/// FFI Error enum (internal)
 #[derive(Error, Debug)]
-pub enum XmtpFfiError {
+pub enum XmtpError {
     #[error("Client error: {0}")]
     Client(String),
     
@@ -43,21 +43,21 @@ pub enum XmtpFfiError {
     Generic(String),
 }
 
-impl XmtpFfiError {
+impl XmtpError {
     pub fn to_ffi(self) -> crate::types::XmtpFfiError {
         let code = match &self {
-            XmtpFfiError::Client(_) => 1,
-            XmtpFfiError::Conversation(_) => 2,
-            XmtpFfiError::Message(_) => 3,
-            XmtpFfiError::Storage(_) => 4,
-            XmtpFfiError::Signature(_) => 5,
-            XmtpFfiError::Network(_) => 6,
-            XmtpFfiError::InvalidArgument(_) => 7,
-            XmtpFfiError::NotFound(_) => 8,
-            XmtpFfiError::NotRegistered => 9,
-            XmtpFfiError::SignerUnavailable => 10,
-            XmtpFfiError::NotInitialized => 11,
-            XmtpFfiError::Generic(_) => -1,
+            XmtpError::Client(_) => 1,
+            XmtpError::Conversation(_) => 2,
+            XmtpError::Message(_) => 3,
+            XmtpError::Storage(_) => 4,
+            XmtpError::Signature(_) => 5,
+            XmtpError::Network(_) => 6,
+            XmtpError::InvalidArgument(_) => 7,
+            XmtpError::NotFound(_) => 8,
+            XmtpError::NotRegistered => 9,
+            XmtpError::SignerUnavailable => 10,
+            XmtpError::NotInitialized => 11,
+            XmtpError::Generic(_) => -1,
         };
         
         let msg = self.to_string();
@@ -70,14 +70,14 @@ impl XmtpFfiError {
     }
 }
 
-impl From<String> for XmtpFfiError {
+impl From<String> for XmtpError {
     fn from(s: String) -> Self {
-        XmtpFfiError::Generic(s)
+        XmtpError::Generic(s)
     }
 }
 
-impl From<&str> for XmtpFfiError {
+impl From<&str> for XmtpError {
     fn from(s: &str) -> Self {
-        XmtpFfiError::Generic(s.to_string())
+        XmtpError::Generic(s.to_string())
     }
 }

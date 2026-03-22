@@ -1,17 +1,22 @@
 //! Conversations FFI functions
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::ptr;
+use std::sync::Arc;
 
 use crate::types::*;
-use crate::error::XmtpFfiError;
+use crate::error::XmtpError;
+
+#[cfg(feature = "libxmtp")]
+use crate::xmtp_client::{XmtpConversationsInner, XmtpConversationInner};
 
 /// Free a conversations handle
 #[no_mangle]
 pub extern "C" fn xmtp_conversations_free(conversations: XmtpConversationsHandle) {
     if !conversations.is_null() {
+        #[cfg(feature = "libxmtp")]
         unsafe {
-            drop(Box::from_raw(conversations as *mut ()));
+            drop(Arc::from_raw(conversations as *const XmtpConversationsInner));
         }
     }
 }
@@ -28,12 +33,44 @@ pub extern "C" fn xmtp_conversations_list(
         return XmtpResult::err("null conversations");
     }
     
-    // TODO: Implement actual listing
-    if !out_len.is_null() {
-        unsafe { *out_len = 0 };
+    #[cfg(feature = "libxmtp")]
+    {
+        let conversations = unsafe { &*(conversations as *const XmtpConversationsInner) };
+        
+        match conversations.list(conv_type) {
+            Ok(list) => {
+                if !out_len.is_null() {
+                    unsafe { *out_len = list.len() };
+                }
+                
+                if !out_conversations.is_null() {
+                    let handles: Vec<XmtpConversationHandle> = list
+                        .into_iter()
+                        .map(|c| Arc::into_raw(Arc::new(c)) as XmtpConversationHandle)
+                        .collect();
+                    
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            handles.as_ptr(),
+                            out_conversations,
+                            handles.len(),
+                        );
+                    }
+                }
+                
+                XmtpResult::ok()
+            }
+            Err(e) => XmtpResult::err(e.to_string()),
+        }
     }
     
-    XmtpResult::ok()
+    #[cfg(not(feature = "libxmtp"))]
+    {
+        if !out_len.is_null() {
+            unsafe { *out_len = 0 };
+        }
+        XmtpResult::err("libxmtp not enabled")
+    }
 }
 
 /// Get a conversation by ID
@@ -51,8 +88,8 @@ pub extern "C" fn xmtp_conversations_get_by_id(
         return XmtpResult::err("null id");
     }
     
-    // TODO: Implement actual lookup
-    XmtpResult::err("not found")
+    // TODO: Implement
+    XmtpResult::err("not implemented")
 }
 
 /// Get a DM by inbox ID
@@ -70,8 +107,33 @@ pub extern "C" fn xmtp_conversations_get_dm_by_inbox_id(
         return XmtpResult::err("null inbox_id");
     }
     
-    // TODO: Implement actual lookup
-    XmtpResult::err("not found")
+    #[cfg(feature = "libxmtp")]
+    {
+        let conversations = unsafe { &*(conversations as *const XmtpConversationsInner) };
+        let inbox_id = unsafe { std::ffi::CStr::from_ptr(inbox_id) }
+            .to_str()
+            .map_err(|e| XmtpError::InvalidArgument(e.to_string()));
+        
+        match inbox_id {
+            Ok(id) => match conversations.create_dm(id) {
+                Ok(conv) => {
+                    if !out_conversation.is_null() {
+                        unsafe { 
+                            *out_conversation = Arc::into_raw(Arc::new(conv)) as XmtpConversationHandle;
+                        };
+                    }
+                    XmtpResult::ok()
+                }
+                Err(e) => XmtpResult::err(e.to_string()),
+            },
+            Err(e) => XmtpResult::err(e.to_string()),
+        }
+    }
+    
+    #[cfg(not(feature = "libxmtp"))]
+    {
+        XmtpResult::err("libxmtp not enabled")
+    }
 }
 
 /// Create a new group
@@ -89,8 +151,39 @@ pub extern "C" fn xmtp_conversations_create_group(
         return XmtpResult::err("null conversations");
     }
     
-    // TODO: Implement actual group creation
-    XmtpResult::err("not implemented")
+    #[cfg(feature = "libxmtp")]
+    {
+        let conversations = unsafe { &*(conversations as *const XmtpConversationsInner) };
+        
+        let name = if name.is_null() {
+            None
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(name).to_str().ok() }
+        };
+        
+        let description = if description.is_null() {
+            None
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(description).to_str().ok() }
+        };
+        
+        match conversations.create_group(name, description) {
+            Ok(group) => {
+                if !out_group.is_null() {
+                    unsafe {
+                        *out_group = Arc::into_raw(Arc::new(group)) as XmtpConversationHandle;
+                    }
+                }
+                XmtpResult::ok()
+            }
+            Err(e) => XmtpResult::err(e.to_string()),
+        }
+    }
+    
+    #[cfg(not(feature = "libxmtp"))]
+    {
+        XmtpResult::err("libxmtp not enabled")
+    }
 }
 
 /// Create a new DM
@@ -100,16 +193,7 @@ pub extern "C" fn xmtp_conversations_create_dm(
     inbox_id: *const c_char,
     out_dm: *mut XmtpConversationHandle,
 ) -> XmtpResult {
-    if conversations.is_null() {
-        return XmtpResult::err("null conversations");
-    }
-    
-    if inbox_id.is_null() {
-        return XmtpResult::err("null inbox_id");
-    }
-    
-    // TODO: Implement actual DM creation
-    XmtpResult::err("not implemented")
+    xmtp_conversations_get_dm_by_inbox_id(conversations, inbox_id, out_dm)
 }
 
 /// Sync conversations from the network
@@ -121,7 +205,7 @@ pub extern "C" fn xmtp_conversations_sync(
         return XmtpResult::err("null conversations");
     }
     
-    // TODO: Implement actual sync
+    // TODO: Implement sync
     XmtpResult::ok()
 }
 
@@ -139,16 +223,14 @@ pub extern "C" fn xmtp_conversations_stream(
         return XmtpResult::err("null conversations");
     }
     
-    // TODO: Implement actual streaming
-    XmtpResult::err("not implemented")
+    // TODO: Implement streaming
+    XmtpResult::err("streaming not yet implemented")
 }
 
 /// End a stream
 #[no_mangle]
 pub extern "C" fn xmtp_stream_end(stream: XmtpStreamHandle) {
     if !stream.is_null() {
-        unsafe {
-            drop(Box::from_raw(stream as *mut ()));
-        }
+        // TODO: Implement stream cleanup
     }
 }

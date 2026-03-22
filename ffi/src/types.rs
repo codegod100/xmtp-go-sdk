@@ -1,6 +1,7 @@
 //! FFI type definitions
 
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_void};
+use std::os::raw::c_int;
 use std::ptr;
 
 /// Opaque handle to an XMTP Client
@@ -109,7 +110,7 @@ impl XmtpResult {
 
     pub fn err(msg: impl Into<String>) -> Self {
         XmtpResult {
-            error: Box::into_raw(Box::new(XmtpFfiError::Generic(msg.into()))),
+            error: Box::into_raw(Box::new(XmtpFfiError::generic(msg.into()))),
         }
     }
 
@@ -162,6 +163,7 @@ impl Drop for XmtpFfiError {
 
 /// Client options
 #[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct XmtpClientOptions {
     pub env: XmtpEnv,
     pub db_path: *const c_char,
@@ -242,6 +244,7 @@ pub struct XmtpSignerCallbackData {
 
 /// List messages options
 #[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct XmtpListMessagesOptions {
     pub limit: usize,
     pub before_ns: u64,

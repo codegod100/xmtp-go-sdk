@@ -1,17 +1,23 @@
 //! Conversation FFI functions
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CString};
+use std::os::raw::c_int;
 use std::ptr;
+use std::sync::Arc;
 
 use crate::types::*;
-use crate::error::XmtpFfiError;
+use crate::error::XmtpError;
+
+#[cfg(feature = "libxmtp")]
+use crate::xmtp_client::XmtpConversationInner;
 
 /// Free a conversation handle
 #[no_mangle]
 pub extern "C" fn xmtp_conversation_free(conversation: XmtpConversationHandle) {
     if !conversation.is_null() {
+        #[cfg(feature = "libxmtp")]
         unsafe {
-            drop(Box::from_raw(conversation as *mut ()));
+            drop(Arc::from_raw(conversation as *const XmtpConversationInner));
         }
     }
 }
@@ -27,22 +33,39 @@ pub extern "C" fn xmtp_conversation_id(
             unsafe {
                 *out_result = XmtpStringResult {
                     value: ptr::null_mut(),
-                    error: Box::into_raw(Box::new(XmtpFfiError::InvalidArgument("null conversation".into()).to_ffi())),
+                    error: Box::into_raw(Box::new(XmtpError::InvalidArgument("null conversation".into()).to_ffi())),
                 };
             }
         }
         return;
     }
     
-    // TODO: Get actual ID
-    let id = CString::new("").unwrap().into_raw();
+    #[cfg(feature = "libxmtp")]
+    {
+        let conv = unsafe { &*(conversation as *const XmtpConversationInner) };
+        let id = hex::encode(conv.id());
+        
+        let value = CString::new(id).unwrap().into_raw();
+        
+        if !out_result.is_null() {
+            unsafe {
+                *out_result = XmtpStringResult {
+                    value,
+                    error: ptr::null_mut(),
+                };
+            }
+        }
+    }
     
-    if !out_result.is_null() {
-        unsafe {
-            *out_result = XmtpStringResult {
-                value: id,
-                error: ptr::null_mut(),
-            };
+    #[cfg(not(feature = "libxmtp"))]
+    {
+        if !out_result.is_null() {
+            unsafe {
+                *out_result = XmtpStringResult {
+                    value: ptr::null_mut(),
+                    error: Box::into_raw(Box::new(XmtpError::Generic("libxmtp not enabled".into()).to_ffi())),
+                };
+            }
         }
     }
 }
@@ -54,8 +77,14 @@ pub extern "C" fn xmtp_conversation_is_active(conversation: XmtpConversationHand
         return false;
     }
     
-    // TODO: Check actual active state
-    true
+    #[cfg(feature = "libxmtp")]
+    {
+        let conv = unsafe { &*(conversation as *const XmtpConversationInner) };
+        conv.is_active()
+    }
+    
+    #[cfg(not(feature = "libxmtp"))]
+    false
 }
 
 /// Get the conversation creation timestamp (nanoseconds)
@@ -65,7 +94,13 @@ pub extern "C" fn xmtp_conversation_created_at_ns(conversation: XmtpConversation
         return 0;
     }
     
-    // TODO: Get actual timestamp
+    #[cfg(feature = "libxmtp")]
+    {
+        let conv = unsafe { &*(conversation as *const XmtpConversationInner) };
+        conv.created_at_ns()
+    }
+    
+    #[cfg(not(feature = "libxmtp"))]
     0
 }
 
@@ -118,7 +153,7 @@ pub extern "C" fn xmtp_conversation_send_text(
             unsafe {
                 *out_result = XmtpStringResult {
                     value: ptr::null_mut(),
-                    error: Box::into_raw(Box::new(XmtpFfiError::InvalidArgument("null conversation".into()).to_ffi())),
+                    error: Box::into_raw(Box::new(XmtpError::InvalidArgument("null conversation".into()).to_ffi())),
                 };
             }
         }
@@ -130,22 +165,55 @@ pub extern "C" fn xmtp_conversation_send_text(
             unsafe {
                 *out_result = XmtpStringResult {
                     value: ptr::null_mut(),
-                    error: Box::into_raw(Box::new(XmtpFfiError::InvalidArgument("null text".into()).to_ffi())),
+                    error: Box::into_raw(Box::new(XmtpError::InvalidArgument("null text".into()).to_ffi())),
                 };
             }
         }
         return;
     }
     
-    // TODO: Implement actual send
-    let message_id = CString::new("").unwrap().into_raw();
+    #[cfg(feature = "libxmtp")]
+    {
+        let conv = unsafe { &*(conversation as *const XmtpConversationInner) };
+        let text = unsafe { std::ffi::CStr::from_ptr(text) };
+        let text_str = text.to_string_lossy();
+        
+        match conv.send_text(&text_str) {
+            Ok(message_id) => {
+                let id = hex::encode(message_id);
+                let value = CString::new(id).unwrap().into_raw();
+                
+                if !out_result.is_null() {
+                    unsafe {
+                        *out_result = XmtpStringResult {
+                            value,
+                            error: ptr::null_mut(),
+                        };
+                    }
+                }
+            }
+            Err(e) => {
+                if !out_result.is_null() {
+                    unsafe {
+                        *out_result = XmtpStringResult {
+                            value: ptr::null_mut(),
+                            error: Box::into_raw(Box::new(e.to_ffi())),
+                        };
+                    }
+                }
+            }
+        }
+    }
     
-    if !out_result.is_null() {
-        unsafe {
-            *out_result = XmtpStringResult {
-                value: message_id,
-                error: ptr::null_mut(),
-            };
+    #[cfg(not(feature = "libxmtp"))]
+    {
+        if !out_result.is_null() {
+            unsafe {
+                *out_result = XmtpStringResult {
+                    value: ptr::null_mut(),
+                    error: Box::into_raw(Box::new(XmtpError::Generic("libxmtp not enabled".into()).to_ffi())),
+                };
+            }
         }
     }
 }
@@ -158,29 +226,8 @@ pub extern "C" fn xmtp_conversation_send_markdown(
     optimistic: bool,
     out_result: *mut XmtpStringResult,
 ) {
-    if conversation.is_null() || markdown.is_null() {
-        if !out_result.is_null() {
-            unsafe {
-                *out_result = XmtpStringResult {
-                    value: ptr::null_mut(),
-                    error: Box::into_raw(Box::new(XmtpFfiError::InvalidArgument("null argument".into()).to_ffi())),
-                };
-            }
-        }
-        return;
-    }
-    
-    // TODO: Implement actual send
-    let message_id = CString::new("").unwrap().into_raw();
-    
-    if !out_result.is_null() {
-        unsafe {
-            *out_result = XmtpStringResult {
-                value: message_id,
-                error: ptr::null_mut(),
-            };
-        }
-    }
+    // TODO: Implement markdown sending
+    xmtp_conversation_send_text(conversation, markdown, optimistic, out_result)
 }
 
 /// Send a reaction
@@ -188,8 +235,8 @@ pub extern "C" fn xmtp_conversation_send_markdown(
 pub extern "C" fn xmtp_conversation_send_reaction(
     conversation: XmtpConversationHandle,
     reference_message_id: *const c_char,
-    action: c_int, // 0 = add, 1 = remove
-    schema: c_int, // 0 = unicode, 1 = custom
+    action: c_int,
+    schema: c_int,
     content: *const c_char,
     optimistic: bool,
     out_result: *mut XmtpStringResult,
@@ -199,21 +246,19 @@ pub extern "C" fn xmtp_conversation_send_reaction(
             unsafe {
                 *out_result = XmtpStringResult {
                     value: ptr::null_mut(),
-                    error: Box::into_raw(Box::new(XmtpFfiError::InvalidArgument("null argument".into()).to_ffi())),
+                    error: Box::into_raw(Box::new(XmtpError::InvalidArgument("null argument".into()).to_ffi())),
                 };
             }
         }
         return;
     }
     
-    // TODO: Implement actual send
-    let message_id = CString::new("").unwrap().into_raw();
-    
+    // TODO: Implement reaction sending
     if !out_result.is_null() {
         unsafe {
             *out_result = XmtpStringResult {
-                value: message_id,
-                error: ptr::null_mut(),
+                value: ptr::null_mut(),
+                error: Box::into_raw(Box::new(XmtpError::Generic("reactions not yet implemented".into()).to_ffi())),
             };
         }
     }
@@ -237,12 +282,31 @@ pub extern "C" fn xmtp_conversation_list_messages(
         unsafe { *opts }
     };
     
-    // TODO: Implement actual listing
-    if !out_len.is_null() {
-        unsafe { *out_len = 0 };
+    #[cfg(feature = "libxmtp")]
+    {
+        let conv = unsafe { &*(conversation as *const XmtpConversationInner) };
+        
+        match conv.list_messages(opts.limit, opts.before_ns, opts.after_ns) {
+            Ok(messages) => {
+                if !out_len.is_null() {
+                    unsafe { *out_len = messages.len() };
+                }
+                
+                // TODO: Return message handles
+                
+                XmtpResult::ok()
+            }
+            Err(e) => XmtpResult::err(e.to_string()),
+        }
     }
     
-    XmtpResult::ok()
+    #[cfg(not(feature = "libxmtp"))]
+    {
+        if !out_len.is_null() {
+            unsafe { *out_len = 0 };
+        }
+        XmtpResult::err("libxmtp not enabled")
+    }
 }
 
 /// Get a message by ID
@@ -260,8 +324,8 @@ pub extern "C" fn xmtp_conversation_get_message_by_id(
         return XmtpResult::err("null message_id");
     }
     
-    // TODO: Implement actual lookup
-    XmtpResult::err("not found")
+    // TODO: Implement
+    XmtpResult::err("not implemented")
 }
 
 /// Stream messages in the conversation
@@ -277,8 +341,8 @@ pub extern "C" fn xmtp_conversation_stream_messages(
         return XmtpResult::err("null conversation");
     }
     
-    // TODO: Implement actual streaming
-    XmtpResult::err("not implemented")
+    // TODO: Implement streaming
+    XmtpResult::err("streaming not yet implemented")
 }
 
 // Group-specific functions
@@ -304,7 +368,7 @@ pub extern "C" fn xmtp_group_update_name(
         return XmtpResult::err("null argument");
     }
     
-    // TODO: Implement actual update
+    // TODO: Implement
     XmtpResult::ok()
 }
 
@@ -315,7 +379,6 @@ pub extern "C" fn xmtp_group_image_url(conversation: XmtpConversationHandle) -> 
         return ptr::null_mut();
     }
     
-    // TODO: Get actual URL
     CString::new("").unwrap().into_raw()
 }
 
@@ -329,7 +392,7 @@ pub extern "C" fn xmtp_group_update_image_url(
         return XmtpResult::err("null argument");
     }
     
-    // TODO: Implement actual update
+    // TODO: Implement
     XmtpResult::ok()
 }
 
@@ -340,7 +403,6 @@ pub extern "C" fn xmtp_group_description(conversation: XmtpConversationHandle) -
         return ptr::null_mut();
     }
     
-    // TODO: Get actual description
     CString::new("").unwrap().into_raw()
 }
 
@@ -354,7 +416,7 @@ pub extern "C" fn xmtp_group_update_description(
         return XmtpResult::err("null argument");
     }
     
-    // TODO: Implement actual update
+    // TODO: Implement
     XmtpResult::ok()
 }
 
@@ -369,7 +431,7 @@ pub extern "C" fn xmtp_group_list_members(
         return XmtpResult::err("null conversation");
     }
     
-    // TODO: Implement actual listing
+    // TODO: Implement
     if !out_len.is_null() {
         unsafe { *out_len = 0 };
     }
@@ -392,7 +454,7 @@ pub extern "C" fn xmtp_group_add_members(
         return XmtpResult::err("no inbox IDs provided");
     }
     
-    // TODO: Implement actual add
+    // TODO: Implement
     XmtpResult::ok()
 }
 
@@ -411,7 +473,7 @@ pub extern "C" fn xmtp_group_remove_members(
         return XmtpResult::err("no inbox IDs provided");
     }
     
-    // TODO: Implement actual remove
+    // TODO: Implement
     XmtpResult::ok()
 }
 
@@ -425,7 +487,7 @@ pub extern "C" fn xmtp_group_is_admin(
         return false;
     }
     
-    // TODO: Implement actual check
+    // TODO: Implement
     false
 }
 
@@ -439,7 +501,7 @@ pub extern "C" fn xmtp_group_is_super_admin(
         return false;
     }
     
-    // TODO: Implement actual check
+    // TODO: Implement
     false
 }
 
@@ -453,7 +515,7 @@ pub extern "C" fn xmtp_group_add_admin(
         return XmtpResult::err("null argument");
     }
     
-    // TODO: Implement actual add
+    // TODO: Implement
     XmtpResult::ok()
 }
 
@@ -467,7 +529,7 @@ pub extern "C" fn xmtp_group_remove_admin(
         return XmtpResult::err("null argument");
     }
     
-    // TODO: Implement actual remove
+    // TODO: Implement
     XmtpResult::ok()
 }
 
@@ -478,7 +540,7 @@ pub extern "C" fn xmtp_group_leave(conversation: XmtpConversationHandle) -> Xmtp
         return XmtpResult::err("null conversation");
     }
     
-    // TODO: Implement actual leave
+    // TODO: Implement
     XmtpResult::ok()
 }
 

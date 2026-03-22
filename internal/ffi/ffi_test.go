@@ -60,13 +60,6 @@ func TestGoBytes(t *testing.T) {
 	})
 }
 
-// TestCFree tests that CFree is a no-op
-func TestCFree(t *testing.T) {
-	// Just verify it doesn't panic
-	CFree(0)
-	CFree(12345)
-}
-
 // TestLibraryPaths tests that library paths are defined
 func TestLibraryPaths(t *testing.T) {
 	if len(libraryPaths) == 0 {

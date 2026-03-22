@@ -5,6 +5,7 @@
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(unused_variables)]
 
 mod client;
 mod conversations;
@@ -14,10 +15,16 @@ mod types;
 mod error;
 mod signer;
 
-pub use types::*;
-pub use error::*;
+#[cfg(feature = "libxmtp")]
+mod xmtp_client;
 
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+pub use types::*;
+pub use error::XmtpError;
+
+#[cfg(feature = "libxmtp")]
+pub use xmtp_client::*;
+
+use std::ffi::{c_char, c_int, CString};
 use std::ptr;
 
 /// Initialize the FFI library
@@ -26,6 +33,16 @@ use std::ptr;
 pub extern "C" fn xmtp_init() -> c_int {
     // Initialize tokio runtime (lazy static)
     let _ = get_runtime();
+    
+    // Initialize logging
+    #[cfg(feature = "libxmtp")]
+    {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .try_init()
+            .ok();
+    }
+    
     0
 }
 
@@ -72,18 +89,7 @@ fn get_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-// Helper to convert Result to XmtpResult
-fn result_to_ffi<T, F>(result: Result<T, XmtpFfiError>, out: *mut T, map_err: F) -> XmtpResult
-where
-    F: Fn(XmtpFfiError) -> XmtpFfiError,
-{
-    match result {
-        Ok(value) => {
-            if !out.is_null() {
-                unsafe { *out = value };
-            }
-            XmtpResult { error: ptr::null_mut() }
-        }
-        Err(e) => XmtpResult { error: Box::into_raw(Box::new(map_err(e))) },
-    }
+// Helper to run async code synchronously
+pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    get_runtime().block_on(future)
 }

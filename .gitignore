@@ -37,4 +37,4 @@ result-*
 
 # Rust
 ffi/target/
-ffi/Cargo.lock
+libxmtp

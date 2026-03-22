@@ -1,10 +1,10 @@
 //! Message FFI functions
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, CString};
+use std::os::raw::c_int;
 use std::ptr;
 
 use crate::types::*;
-use crate::error::XmtpFfiError;
 
 /// Free a message handle
 #[no_mangle]
