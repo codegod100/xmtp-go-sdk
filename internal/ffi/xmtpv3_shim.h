@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 
 // Define away the annotations
 #define _Nonnull
@@ -35,11 +36,27 @@ typedef struct ForeignBytes {
 #define UNIFFI_CALL_ERROR 1
 #define UNIFFI_CALL_PANIC 2
 
+// Helper to create ForeignBytes from raw bytes (properly aligned)
+static inline ForeignBytes make_foreign_bytes(const uint8_t *data, int32_t len) {
+    ForeignBytes fb;
+    fb.len = len;
+    fb.data = data;
+    return fb;
+}
+
 // Buffer functions - use ffi_xmtpv3_ prefix
 extern RustBuffer ffi_xmtpv3_rustbuffer_alloc(uint64_t size, RustCallStatus *out_status);
 extern RustBuffer ffi_xmtpv3_rustbuffer_from_bytes(ForeignBytes bytes, RustCallStatus *out_status);
 extern void ffi_xmtpv3_rustbuffer_free(RustBuffer buf, RustCallStatus *out_status);
 extern RustBuffer ffi_xmtpv3_rustbuffer_reserve(RustBuffer buf, uint64_t additional, RustCallStatus *out_status);
+
+// Ethereum utilities
+extern RustBuffer uniffi_xmtpv3_fn_func_get_version_info(RustCallStatus *out_status);
+extern RustBuffer uniffi_xmtpv3_fn_func_ethereum_generate_public_key(RustBuffer private_key, RustCallStatus *out_status);
+extern RustBuffer uniffi_xmtpv3_fn_func_ethereum_hash_personal(RustBuffer message, RustCallStatus *out_status);
+extern RustBuffer uniffi_xmtpv3_fn_func_ethereum_sign_recoverable(RustBuffer msg, RustBuffer private_key, int8_t hashing, RustCallStatus *out_status);
+extern RustBuffer uniffi_xmtpv3_fn_func_ethereum_address_from_pubkey(RustBuffer pubkey, RustCallStatus *out_status);
+extern RustBuffer uniffi_xmtpv3_fn_func_generate_inbox_id(RustBuffer account_identifier, uint64_t nonce, RustCallStatus *out_status);
 
 // Connect to backend
 extern uint64_t uniffi_xmtpv3_fn_func_connect_to_backend(
