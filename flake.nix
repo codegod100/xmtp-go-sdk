@@ -5,23 +5,26 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
+    crane.url = "github:ipetkov/crane";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, ... }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
           inherit system overlays;
         };
-        
-        # Rust toolchain for building the FFI library
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-          extensions = [ "rust-src" "rust-analyzer" ];
-          targets = [ "wasm32-unknown-unknown" ];
-        };
-        
-        # Build inputs common to both build and dev
+
+        lib = nixpkgs.lib;
+
+        # Rust toolchain
+        rustToolchain = pkgs.rust-bin.stable.latest.default;
+
+        # Crane library
+        craneLib = crane.mkLib pkgs;
+
+        # Build inputs
         buildInputs = with pkgs; [
           openssl
         ] ++ lib.optionals stdenv.isLinux [
@@ -31,128 +34,139 @@
           darwin.apple_sdk.frameworks.CoreFoundation
           darwin.apple_sdk.frameworks.SystemConfiguration
         ];
-        
-        # Native build inputs
+
         nativeBuildInputs = with pkgs; [
           pkg-config
         ];
-        
-        lib = nixpkgs.lib;
+
+        # Fetch libxmtp source
+        libxmtpSrc = pkgs.fetchFromGitHub {
+          owner = "xmtp";
+          repo = "libxmtp";
+          rev = "main";
+          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; # Will be fixed
+        };
+
+        # Common args for crane builds
+        commonArgs = {
+          inherit buildInputs nativeBuildInputs;
+        };
+
       in {
         packages = {
           default = self.packages.${system}.xmtp-go-sdk;
-          
+
+          # Go SDK package
           xmtp-go-sdk = pkgs.buildGo124Module {
             pname = "xmtp-go-sdk";
             version = "0.1.0";
             src = ./.;
-            
+
             vendorHash = "sha256-7SrehajxKazbFz7m9YbslCOrI3U+NDEzxWroo5Jy8VU=";
             modRoot = ".";
-            
+
             inherit buildInputs nativeBuildInputs;
-            
-            # Skip tests during build (run separately)
             doCheck = false;
-            
+
             meta = with lib; {
               description = "Go SDK for XMTP messaging";
               homepage = "https://github.com/xmtp/go-sdk";
               license = licenses.mit;
-              maintainers = [ ];
             };
           };
-          
-          # Build the Rust FFI library
-          xmtp-ffi = pkgs.rustPlatform.buildRustPackage {
-            pname = "xmtp-ffi";
+
+          # Build stub FFI library (no libxmtp dependency, for testing)
+          xmtp-ffi-stub = craneLib.buildPackage (commonArgs // {
+            pname = "xmtp-ffi-stub";
             version = "0.1.0";
             src = ./ffi;
-            
-            cargoLock = {
-              lockFile = ./ffi/Cargo.lock;
-            };
-            
-            inherit buildInputs nativeBuildInputs;
-            
+
+            cargoToml = ./ffi/Cargo.toml;
+            cargoLock = ./ffi/Cargo.lock;
+
             postInstall = ''
-              # Copy the shared library to a standard location
               mkdir -p $out/lib
-              cp target/*/release/libxmtp_ffi.* $out/lib/ || true
-              cp target/release/libxmtp_ffi.* $out/lib/ || true
+              cp target/release/libxmtp_ffi.so $out/lib/ 2>/dev/null || true
+              cp target/release/libxmtp_ffi.a $out/lib/ 2>/dev/null || true
             '';
-            
-            meta = with lib; {
-              description = "C FFI bindings for libxmtp";
-            };
-          };
-        };
-        
-        devShells = {
-          default = pkgs.mkShell {
-            inputsFrom = [ self.packages.${system}.xmtp-go-sdk ];
-            
-            buildInputs = buildInputs ++ [
-              # Go
-              pkgs.go
-              pkgs.gotools
-              pkgs.gopls
-              pkgs.go-outline
-              
-              # Rust
-              rustToolchain
-              pkgs.cargo-watch
-              pkgs.cargo-edit
-              
-              # Build tools
-              pkgs.pkg-config
-              pkgs.cmake
-              pkgs.mold
-              
-              # Development tools
-              pkgs.gdb
-              pkgs.just
-            ] ++ nativeBuildInputs;
-            
-            shellHook = ''
-              echo "XMTP Go SDK Development Environment"
-              echo "===================================="
-              echo ""
-              echo "Go version: $(go version)"
-              echo "Rust version: $(rustc --version)"
-              echo ""
-              echo "Commands:"
-              echo "  make build      - Build the Go SDK"
-              echo "  make test       - Run tests"
-              echo "  make ffi        - Build the Rust FFI library"
-              echo "  make example    - Build the example"
-              echo ""
-              
-              # Set library path for finding the FFI library
-              export LD_LIBRARY_PATH="$PWD:$LD_LIBRARY_PATH"
-            '';
-          };
-        };
-        
-        checks = {
-          # Go tests
-          test = pkgs.buildGo124Module {
-            pname = "xmtp-go-sdk-test";
+
+            meta.description = "C FFI stubs for libxmtp";
+          });
+
+          # Build FFI with real libxmtp (workspace build)
+          xmtp-ffi = pkgs.stdenv.mkDerivation {
+            pname = "xmtp-ffi";
             version = "0.1.0";
-            src = ./.;
-            
-            vendorHash = "sha256-7SrehajxKazbFz7m9YbslCOrI3U+NDEzxWroo5Jy8VU=";
-            modRoot = ".";
-            
-            inherit buildInputs nativeBuildInputs;
-            
-            doCheck = true;
-            checkPhase = ''
-              runHook preCheck
-              go test -v ./...
-              runHook postCheck
+
+            # Use libxmtp source as base
+            src = pkgs.fetchFromGitHub {
+              owner = "xmtp";
+              repo = "libxmtp";
+              rev = "2f6afaa729b11c8c2a25d7d470f6d7f852e78553";
+              hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            };
+
+            nativeBuildInputs = nativeBuildInputs ++ [ rustToolchain ];
+            buildInputs = buildInputs;
+
+            # Copy our FFI crate into the workspace
+            preBuild = ''
+              # Add our FFI crate to the workspace
+              cp -r ${./ffi} bindings/xmtp-ffi
+              chmod -R u+w bindings/xmtp-ffi
+
+              # Update workspace members
+              sed -i 's/members = \[/members = ["bindings\/xmtp-ffi",/' Cargo.toml
             '';
+
+            buildPhase = ''
+              runHook preBuild
+              cargo build -p xmtp-ffi --release
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/lib
+              cp target/release/libxmtp_ffi.so $out/lib/
+              cp target/release/libxmtp_ffi.a $out/lib/
+              runHook postInstall
+            '';
+
+            meta.description = "C FFI bindings for libxmtp with full implementation";
           };
+        };
+
+        devShells.default = pkgs.mkShell {
+          inputsFrom = [ self.packages.${system}.xmtp-go-sdk ];
+
+          buildInputs = buildInputs ++ [
+            pkgs.go
+            pkgs.gopls
+            pkgs.gotools
+            rustToolchain
+            pkgs.cargo-watch
+          ] ++ nativeBuildInputs;
+
+          shellHook = ''
+            echo "XMTP Go SDK Development"
+            echo "  Go: $(go version)"
+            echo "  Rust: $(rustc --version)"
+            echo ""
+            echo "Commands: make build | make test | make ffi"
+            export LD_LIBRARY_PATH="$PWD/result/lib:$LD_LIBRARY_PATH"
+          '';
+        };
+
+        checks.test = pkgs.buildGo124Module {
+          pname = "xmtp-go-sdk-test";
+          version = "0.1.0";
+          src = ./.;
+          vendorHash = "sha256-7SrehajxKazbFz7m9YbslCOrI3U+NDEzxWroo5Jy8VU=";
+          modRoot = ".";
+          inherit buildInputs nativeBuildInputs;
+          doCheck = true;
+          checkPhase = "go test -v ./...";
         };
       }
     );
