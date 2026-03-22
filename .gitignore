@@ -1,0 +1,40 @@
+*.db3
+*.db
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.log
+
+# Go
+go.sum
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build
+/bin/
+/dist/
+/target/
+
+# Test
+coverage.out
+coverage.html
+
+# Nix
+result
+result-*
+.direnv/
+.devenv/
+
+# Rust
+ffi/target/
+ffi/Cargo.lock

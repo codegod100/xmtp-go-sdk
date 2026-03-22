@@ -1,0 +1,35 @@
+[package]
+name = "xmtp-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "C FFI bindings for XMTP MLS library"
+license = "MIT"
+
+[lib]
+name = "xmtp_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+xmtp_mls.workspace = true
+xmtp_common.workspace = true
+xmtp_db.workspace = true
+xmtp_id.workspace = true
+xmtp_cryptography.workspace = true
+xmtp_content_types.workspace = true
+xmtp_proto.workspace = true
+xmtp_api.workspace = true
+xmtp_api_grpc.workspace = true
+
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+futures.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[build-dependencies]
+cbindgen = "0.28"
+
+[[bin]]
+name = "generate-headers"
+path = "src/bin/generate_headers.rs"
