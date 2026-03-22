@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -475,20 +476,31 @@ func awaitFuture(handle uint64) error {
 		return loadErr
 	}
 
-	callbackMu.Lock()
-	defer callbackMu.Unlock()
-
 	cb := purego.NewCallback(futureCallback)
-	for {
+
+	for i := 0; i < 10000; i++ { // max iterations to prevent infinite loop
+		// Set result to "not ready" before polling
+		callbackMu.Lock()
+		callbackResult = FutureMaybeReady
+		callbackMu.Unlock()
+
+		// Poll without holding the lock - this allows callback to run
 		ffi_future_poll_u64(handle, cb, 0)
-		callbackCond.Wait()
 
-		if callbackResult == FutureReady {
-			break
+		// Wait for callback to signal
+		callbackMu.Lock()
+		result := callbackResult
+		callbackMu.Unlock()
+
+		if result == FutureReady {
+			return nil
 		}
+		
+		// Sleep to prevent tight spinning
+		time.Sleep(10 * time.Millisecond)
 	}
-
-	return nil
+	
+	return fmt.Errorf("future polling timeout after 10000 iterations")
 }
 
 func awaitFutureU64(handle uint64) (uint64, error) {
@@ -511,49 +523,127 @@ func freeFuture(handle uint64) {
 
 // -- Client functions --
 
+// serializeOptionString serializes Option<String> for UniFFI
+// None: [0] (single byte)
+// Some(s): [1] + String serialization (BE i32 length + utf8 bytes)
+func serializeOptionString(s string) (C.RustBuffer, error) {
+	if s == "" {
+		// None: just [0]
+		return cBufferFromBytes([]byte{0})
+	}
+	// Some: [1] + String with BE length prefix
+	data := make([]byte, 1+4+len(s))
+	data[0] = 1 // Some flag
+	// BE length prefix for string
+	strLen := uint32(len(s))
+	data[1] = byte(strLen >> 24)
+	data[2] = byte(strLen >> 16)
+	data[3] = byte(strLen >> 8)
+	data[4] = byte(strLen)
+	copy(data[5:], s)
+	return cBufferFromBytes(data)
+}
+
+// serializeFfiClientMode serializes Option<FfiClientMode> for UniFFI
+// FfiClientMode enum: Default=1, Notification=2 (UniFFI is 1-indexed)
+// None: [0] (single i8)
+// Some(mode): [1] + i32(variant) BE
+func serializeFfiClientMode(mode int) (C.RustBuffer, error) {
+	// mode: 0=Default, 1=Notification (Go indexing)
+	// UniFFI enum variants are 1-indexed: Default=1, Notification=2
+	variant := int32(1) // Default
+	if mode == 1 {
+		variant = 2 // Notification
+	}
+	// Some: i8(1) + i32(variant) big-endian
+	data := make([]byte, 1+4)
+	data[0] = 1 // Some flag
+	data[1] = byte(variant >> 24)
+	data[2] = byte(variant >> 16)
+	data[3] = byte(variant >> 8)
+	data[4] = byte(variant)
+	return cBufferFromBytes(data)
+}
+
+// cBufferFromBytes creates a RustBuffer from raw bytes (no serialization)
+func cBufferFromBytes(data []byte) (C.RustBuffer, error) {
+	if len(data) == 0 {
+		return C.RustBuffer{}, nil
+	}
+	var status C.RustCallStatus
+	buf := C.ffi_xmtpv3_rustbuffer_alloc(C.uint64_t(len(data)), &status)
+	if status.code != CallSuccess {
+		return C.RustBuffer{}, cStatusToError(status)
+	}
+	dst := unsafe.Slice((*byte)(unsafe.Pointer(buf.data)), buf.capacity)
+	copy(dst, data)
+	buf.len = C.uint64_t(len(data))
+	return buf, nil
+}
+
+// serializeNoneBuffer creates a RustBuffer representing Option::None
+// None is serialized as a single i8(0) byte
+func serializeNoneBuffer() C.RustBuffer {
+	buf, _ := cBufferFromBytes([]byte{0})
+	return buf
+}
+
 // ConnectToBackend connects to the XMTP backend
 func ConnectToBackend(v3Host, gatewayHost, appVersion string) (apiHandle uint64, err error) {
 	if !libLoaded {
 		return 0, loadErr
 	}
 
-	v3HostBuf, err := cBytesToBuffer([]byte(v3Host))
+	// v3_host: String (standalone, raw bytes)
+	v3HostBuf, err := cStringToBuffer(v3Host)
 	if err != nil {
 		return 0, err
 	}
-	defer cFreeBuffer(v3HostBuf)
 
-	gatewayHostBuf, err := cBytesToBuffer([]byte(gatewayHost))
+	// gateway_host: Option<String> - serialize as None if empty, Some with length prefix otherwise
+	gatewayHostBuf, err := serializeOptionString(gatewayHost)
 	if err != nil {
+		cFreeBuffer(v3HostBuf)
 		return 0, err
 	}
-	defer cFreeBuffer(gatewayHostBuf)
 
-	clientModeBuf, err := cBytesToBuffer([]byte("ReadWrite"))
+	// client_mode: Option<FfiClientMode> - default to Some(Default)
+	clientModeBuf, err := serializeFfiClientMode(0) // 0 = Default
 	if err != nil {
+		cFreeBuffer(v3HostBuf)
+		cFreeBuffer(gatewayHostBuf)
 		return 0, err
 	}
-	defer cFreeBuffer(clientModeBuf)
 
-	appVersionBuf, err := cBytesToBuffer([]byte(appVersion))
+	// app_version: Option<String>
+	appVersionBuf, err := serializeOptionString(appVersion)
 	if err != nil {
+		cFreeBuffer(v3HostBuf)
+		cFreeBuffer(gatewayHostBuf)
+		cFreeBuffer(clientModeBuf)
 		return 0, err
 	}
-	defer cFreeBuffer(appVersionBuf)
 
 	var status C.RustCallStatus
 	futureHandle := C.uniffi_xmtpv3_fn_func_connect_to_backend(
 		v3HostBuf, gatewayHostBuf, clientModeBuf, appVersionBuf,
-		C.RustBuffer{}, C.RustBuffer{},
+		serializeNoneBuffer(), serializeNoneBuffer(), // auth_callback and auth_handle: None
 		&status,
 	)
+
+	// Note: Buffers are consumed by Rust - do NOT free them after the call
+
 	if status.code != CallSuccess {
 		return 0, cStatusToError(status)
 	}
-
+	
 	apiHandle, err = awaitFutureU64(uint64(futureHandle))
+	if err != nil {
+		freeFuture(uint64(futureHandle))
+		return 0, err
+	}
 	freeFuture(uint64(futureHandle))
-	return apiHandle, err
+	return apiHandle, nil
 }
 
 // FreeClient frees a client handle
